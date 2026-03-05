@@ -322,6 +322,368 @@ pub fn getRowCodepoints(
     return count;
 }
 
+/// Render a row as HTML with CSS classes.
+/// Returns allocated HTML string via out_ptr/out_len. Caller must free with freeString.
+pub fn renderRowHtml(
+    handle: TerminalHandle,
+    row: u32,
+    out_ptr: *[*]const u8,
+    out_len: *usize,
+) callconv(.c) Result {
+    const wrapper = handle orelse return .invalid_value;
+    const alloc = wrapper.alloc;
+    const screen = &wrapper.terminal.screens.active.*;
+
+    const pin = navigateToRow(screen, row) orelse {
+        out_ptr.* = "";
+        out_len.* = 0;
+        return .success;
+    };
+    const pg = &pin.node.data;
+    const page_row = pg.getRow(pin.y);
+    const cells = pg.getCells(page_row);
+
+    var buf = std.array_list.Managed(u8).init(alloc);
+    defer buf.deinit();
+
+    // Find last non-space cell to trim trailing whitespace
+    var last_content: usize = 0;
+    for (0..cells.len) |i| {
+        const cp = cells[i].codepoint();
+        if (cp != 0 and cp != ' ') {
+            last_content = i + 1;
+        }
+    }
+
+    if (last_content == 0) {
+        // Empty row
+        const result_buf = alloc.alloc(u8, 0) catch return .out_of_memory;
+        out_ptr.* = result_buf.ptr;
+        out_len.* = 0;
+        return .success;
+    }
+
+    // Group consecutive cells with the same style into spans
+    var span_start: usize = 0;
+    var current_style = cellStyleInfo(pg, cells[0]);
+
+    var i: usize = 1;
+    while (i <= last_content) : (i += 1) {
+        const next_style = if (i < last_content) cellStyleInfo(pg, cells[i]) else CellStyle{};
+        const style_changed = i == last_content or !std.meta.eql(next_style, current_style);
+
+        if (style_changed) {
+            // Emit span for cells[span_start..i]
+            writeSpan(&buf, cells[span_start..i], current_style) catch return .out_of_memory;
+            span_start = i;
+            current_style = next_style;
+        }
+    }
+
+    // Copy to a standalone allocation
+    const result_buf = alloc.alloc(u8, buf.items.len) catch return .out_of_memory;
+    @memcpy(result_buf, buf.items);
+    out_ptr.* = result_buf.ptr;
+    out_len.* = result_buf.len;
+    return .success;
+}
+
+fn cellStyleInfo(pg: anytype, cell: anytype) CellStyle {
+    var cs = CellStyle{};
+    if (cell.style_id != 0) {
+        const sty = pg.styles.get(pg.memory, cell.style_id);
+        fillStyle(&cs, sty);
+    }
+    return cs;
+}
+
+fn writeSpan(buf: *std.array_list.Managed(u8), cells: anytype, sty: CellStyle) !void {
+    // Resolve colors, handling reverse
+    var fg_tag = sty.fg_tag;
+    var fg_r = sty.fg_r;
+    var fg_g = sty.fg_g;
+    var fg_b = sty.fg_b;
+    var fg_pal = sty.fg_palette;
+    var bg_tag = sty.bg_tag;
+    var bg_r = sty.bg_r;
+    var bg_g = sty.bg_g;
+    var bg_b = sty.bg_b;
+    var bg_pal = sty.bg_palette;
+
+    if (sty.flags & STYLE_FLAG_INVERSE != 0) {
+        // Swap fg and bg
+        const tmp_tag = fg_tag;
+        const tmp_r = fg_r;
+        const tmp_g = fg_g;
+        const tmp_b = fg_b;
+        const tmp_pal = fg_pal;
+        fg_tag = bg_tag;
+        fg_r = bg_r;
+        fg_g = bg_g;
+        fg_b = bg_b;
+        fg_pal = bg_pal;
+        bg_tag = tmp_tag;
+        bg_r = tmp_r;
+        bg_g = tmp_g;
+        bg_b = tmp_b;
+        bg_pal = tmp_pal;
+    }
+
+    // Build class list
+    var has_classes = false;
+    var has_styles = false;
+
+    // Check if we need any styling at all
+    const has_fg = fg_tag != .none;
+    const has_bg = bg_tag != .none;
+    const has_flags = sty.flags & ~STYLE_FLAG_INVERSE != 0; // already handled reverse
+    const needs_span = has_fg or has_bg or has_flags;
+
+    if (!needs_span) {
+        // Plain text, no span needed
+        for (cells) |cell| {
+            const cp = cell.codepoint();
+            if (cp == 0 or cp == ' ') {
+                try buf.append(' ');
+            } else {
+                try writeHtmlEscapedCodepoint(buf, cp);
+            }
+        }
+        return;
+    }
+
+    try buf.appendSlice("<span");
+
+    // Collect CSS classes
+    var class_buf: [512]u8 = undefined;
+    var class_pos: usize = 0;
+
+    // Foreground color classes
+    if (has_fg) {
+        if (fg_tag == .palette) {
+            const cls = fgPaletteClass(fg_pal);
+            if (cls.len > 0) {
+                if (has_classes) {
+                    class_buf[class_pos] = ' ';
+                    class_pos += 1;
+                }
+                @memcpy(class_buf[class_pos..][0..cls.len], cls);
+                class_pos += cls.len;
+                has_classes = true;
+            }
+        }
+        // RGB fg handled as inline style below
+    }
+
+    // Background color classes
+    if (has_bg) {
+        if (bg_tag == .palette) {
+            const cls = bgPaletteClass(bg_pal);
+            if (cls.len > 0) {
+                if (has_classes) {
+                    class_buf[class_pos] = ' ';
+                    class_pos += 1;
+                }
+                @memcpy(class_buf[class_pos..][0..cls.len], cls);
+                class_pos += cls.len;
+                has_classes = true;
+            }
+        }
+        // RGB bg handled as inline style below
+    }
+
+    // Style flag classes
+    if (sty.flags & STYLE_FLAG_BOLD != 0) {
+        const cls = " font-bold";
+        if (!has_classes) {
+            @memcpy(class_buf[class_pos..][0..cls.len - 1], cls[1..]);
+            class_pos += cls.len - 1;
+        } else {
+            @memcpy(class_buf[class_pos..][0..cls.len], cls);
+            class_pos += cls.len;
+        }
+        has_classes = true;
+    } else if (sty.flags & STYLE_FLAG_FAINT != 0) {
+        const cls = "opacity-50";
+        if (has_classes) {
+            class_buf[class_pos] = ' ';
+            class_pos += 1;
+        }
+        @memcpy(class_buf[class_pos..][0..cls.len], cls);
+        class_pos += cls.len;
+        has_classes = true;
+    }
+    if (sty.flags & STYLE_FLAG_UNDERLINE != 0) {
+        const cls = "underline";
+        if (has_classes) {
+            class_buf[class_pos] = ' ';
+            class_pos += 1;
+        }
+        @memcpy(class_buf[class_pos..][0..cls.len], cls);
+        class_pos += cls.len;
+        has_classes = true;
+    }
+    if (sty.flags & STYLE_FLAG_INVISIBLE != 0) {
+        const cls = "opacity-0";
+        if (has_classes) {
+            class_buf[class_pos] = ' ';
+            class_pos += 1;
+        }
+        @memcpy(class_buf[class_pos..][0..cls.len], cls);
+        class_pos += cls.len;
+        has_classes = true;
+    }
+    if (sty.flags & STYLE_FLAG_BLINK != 0) {
+        const cls = "animate-pulse";
+        if (has_classes) {
+            class_buf[class_pos] = ' ';
+            class_pos += 1;
+        }
+        @memcpy(class_buf[class_pos..][0..cls.len], cls);
+        class_pos += cls.len;
+        has_classes = true;
+    }
+
+    if (has_classes) {
+        try buf.appendSlice(" class=\"");
+        try buf.appendSlice(class_buf[0..class_pos]);
+        try buf.append('"');
+    }
+
+    // Inline styles for RGB colors and 256-color palette (indices 16+)
+    {
+        var style_buf: [128]u8 = undefined;
+        var style_pos: usize = 0;
+
+        if (has_fg and fg_tag == .rgb) {
+            const s = std.fmt.bufPrint(style_buf[style_pos..], "color:#{x:0>2}{x:0>2}{x:0>2}", .{ fg_r, fg_g, fg_b }) catch unreachable;
+            style_pos += s.len;
+            has_styles = true;
+        } else if (has_fg and fg_tag == .palette and fg_pal >= 16) {
+            const rgb = palette256ToRgb(fg_pal);
+            const s = std.fmt.bufPrint(style_buf[style_pos..], "color:#{x:0>2}{x:0>2}{x:0>2}", .{ rgb[0], rgb[1], rgb[2] }) catch unreachable;
+            style_pos += s.len;
+            has_styles = true;
+        }
+        if (has_bg and bg_tag == .rgb) {
+            if (has_styles) {
+                style_buf[style_pos] = ';';
+                style_pos += 1;
+            }
+            const s = std.fmt.bufPrint(style_buf[style_pos..], "background-color:#{x:0>2}{x:0>2}{x:0>2}", .{ bg_r, bg_g, bg_b }) catch unreachable;
+            style_pos += s.len;
+            has_styles = true;
+        } else if (has_bg and bg_tag == .palette and bg_pal >= 16) {
+            if (has_styles) {
+                style_buf[style_pos] = ';';
+                style_pos += 1;
+            }
+            const rgb = palette256ToRgb(bg_pal);
+            const s = std.fmt.bufPrint(style_buf[style_pos..], "background-color:#{x:0>2}{x:0>2}{x:0>2}", .{ rgb[0], rgb[1], rgb[2] }) catch unreachable;
+            style_pos += s.len;
+            has_styles = true;
+        }
+
+        if (has_styles) {
+            try buf.appendSlice(" style=\"");
+            try buf.appendSlice(style_buf[0..style_pos]);
+            try buf.append('"');
+        }
+    }
+
+    try buf.append('>');
+
+    // Cell content
+    for (cells) |cell| {
+        const cp = cell.codepoint();
+        if (cp == 0 or cp == ' ') {
+            try buf.append(' ');
+        } else {
+            try writeHtmlEscapedCodepoint(buf, cp);
+        }
+    }
+
+    try buf.appendSlice("</span>");
+}
+
+fn writeHtmlEscapedCodepoint(buf: *std.array_list.Managed(u8), cp: u21) !void {
+    switch (cp) {
+        '<' => try buf.appendSlice("&lt;"),
+        '>' => try buf.appendSlice("&gt;"),
+        '&' => try buf.appendSlice("&amp;"),
+        '"' => try buf.appendSlice("&quot;"),
+        else => {
+            // Encode as UTF-8
+            var utf8_buf: [4]u8 = undefined;
+            const len = std.unicode.utf8Encode(cp, &utf8_buf) catch return;
+            try buf.appendSlice(utf8_buf[0..len]);
+        },
+    }
+}
+
+// ANSI palette color index → Tailwind CSS class mappings.
+// Indices 0-15 are the standard/bright colors; 16+ use inline styles.
+fn fgPaletteClass(idx: u8) []const u8 {
+    return switch (idx) {
+        0 => "text-blackHole",
+        1 => "text-red-500 dark:text-red-400",
+        2 => "text-green-500 dark:text-green-400",
+        3 => "text-yellow-500 dark:text-yellow-400",
+        4 => "text-blue-500 dark:text-blue-400",
+        5 => "text-purple-500 dark:text-purple-400",
+        6 => "text-cyan-500 dark:text-cyan-400",
+        7 => "text-white",
+        8 => "text-gray-300 dark:text-gray-200",
+        9 => "text-red-300 dark:text-red-200",
+        10 => "text-green-300 dark:text-green-200",
+        11 => "text-yellow-300 dark:text-yellow-200",
+        12 => "text-blue-300 dark:text-blue-200",
+        13 => "text-purple-300 dark:text-purple-200",
+        14 => "text-cyan-300 dark:text-cyan-200",
+        15 => "text-white",
+        else => "", // 16-255: handled as inline style
+    };
+}
+
+fn bgPaletteClass(idx: u8) []const u8 {
+    return switch (idx) {
+        0 => "bg-gray-500 dark:bg-gray-400",
+        1 => "bg-red-500 dark:bg-red-400",
+        2 => "bg-green-500 dark:bg-green-400",
+        3 => "bg-yellow-500 dark:bg-yellow-400",
+        4 => "bg-blue-500 dark:bg-blue-400",
+        5 => "bg-purple-500 dark:bg-purple-400",
+        6 => "bg-cyan-500 dark:bg-cyan-400",
+        7 => "bg-white",
+        8 => "bg-gray-300 dark:bg-gray-200",
+        9 => "bg-red-300 dark:bg-red-200",
+        10 => "bg-green-300 dark:bg-green-200",
+        11 => "bg-yellow-300 dark:bg-yellow-200",
+        12 => "bg-blue-300 dark:bg-blue-200",
+        13 => "bg-purple-300 dark:bg-purple-200",
+        14 => "bg-cyan-300 dark:bg-cyan-200",
+        15 => "bg-white",
+        else => "", // 16-255: handled as inline style
+    };
+}
+
+/// Convert 256-color palette index (16-255) to RGB.
+/// 16-231: 6×6×6 color cube; 232-255: grayscale ramp.
+fn palette256ToRgb(idx: u8) [3]u8 {
+    if (idx < 16) return .{ 0, 0, 0 }; // shouldn't happen, handled by class
+    if (idx <= 231) {
+        const i = idx - 16;
+        const b_idx = @mod(i, 6);
+        const g_idx = @mod(i / 6, 6);
+        const r_idx = i / 36;
+        const val = [_]u8{ 0, 0x5f, 0x87, 0xaf, 0xd7, 0xff };
+        return .{ val[r_idx], val[g_idx], val[b_idx] };
+    }
+    // Grayscale: 232-255
+    const g: u8 = 8 + (idx - 232) * 10;
+    return .{ g, g, g };
+}
+
 /// Get styles for an entire row. Writes up to max_cols styles to out_buf.
 /// Returns the number of columns actually written.
 pub fn getRowStyles(

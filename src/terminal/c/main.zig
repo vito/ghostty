@@ -67,6 +67,7 @@ pub const terminal_dump_screen = terminal.dumpScreen;
 pub const terminal_free_string = terminal.freeString;
 pub const terminal_get_row_codepoints = terminal.getRowCodepoints;
 pub const terminal_get_row_styles = terminal.getRowStyles;
+pub const terminal_render_row_html = terminal.renderRowHtml;
 
 test {
     _ = color;
