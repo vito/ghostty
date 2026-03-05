@@ -151,6 +151,7 @@ comptime {
         @export(&c.terminal_get_row_codepoints, .{ .name = "ghostty_terminal_get_row_codepoints" });
         @export(&c.terminal_get_row_styles, .{ .name = "ghostty_terminal_get_row_styles" });
         @export(&c.terminal_render_row_html, .{ .name = "ghostty_terminal_render_row_html" });
+        @export(&c.terminal_render_row_html_highlighted, .{ .name = "ghostty_terminal_render_row_html_highlighted" });
         @export(&c.sgr_new, .{ .name = "ghostty_sgr_new" });
         @export(&c.sgr_free, .{ .name = "ghostty_sgr_free" });
         @export(&c.sgr_reset, .{ .name = "ghostty_sgr_reset" });

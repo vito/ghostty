@@ -330,6 +330,33 @@ pub fn renderRowHtml(
     out_ptr: *[*]const u8,
     out_len: *usize,
 ) callconv(.c) Result {
+    return renderRowHtmlImpl(handle, row, 0, null, 0, out_ptr, out_len);
+}
+
+/// Render a row as HTML with highlight <mark> tags and an optional start column offset.
+/// highlight_buf points to pairs of u32 [start, end, start, end, ...] in cell coordinates.
+/// highlight_count is the number of pairs (so buffer has highlight_count * 2 u32s).
+pub fn renderRowHtmlHighlighted(
+    handle: TerminalHandle,
+    row: u32,
+    start_col: u32,
+    highlight_buf: ?[*]const u32,
+    highlight_count: u32,
+    out_ptr: *[*]const u8,
+    out_len: *usize,
+) callconv(.c) Result {
+    return renderRowHtmlImpl(handle, row, start_col, highlight_buf, highlight_count, out_ptr, out_len);
+}
+
+fn renderRowHtmlImpl(
+    handle: TerminalHandle,
+    row: u32,
+    start_col: u32,
+    highlight_buf: ?[*]const u32,
+    highlight_count: u32,
+    out_ptr: *[*]const u8,
+    out_len: *usize,
+) Result {
     const wrapper = handle orelse return .invalid_value;
     const alloc = wrapper.alloc;
     const screen = &wrapper.terminal.screens.active.*;
@@ -343,41 +370,88 @@ pub fn renderRowHtml(
     const page_row = pg.getRow(pin.y);
     const cells = pg.getCells(page_row);
 
+    const col_start: usize = @min(@as(usize, start_col), cells.len);
+
     var buf = std.array_list.Managed(u8).init(alloc);
     defer buf.deinit();
 
     // Find last non-space cell to trim trailing whitespace
-    var last_content: usize = 0;
-    for (0..cells.len) |i| {
-        const cp = cells[i].codepoint();
+    var last_content: usize = col_start;
+    for (col_start..cells.len) |ci| {
+        const cp = cells[ci].codepoint();
         if (cp != 0 and cp != ' ') {
-            last_content = i + 1;
+            last_content = ci + 1;
         }
     }
 
-    if (last_content == 0) {
-        // Empty row
+    if (last_content <= col_start) {
         const result_buf = alloc.alloc(u8, 0) catch return .out_of_memory;
         out_ptr.* = result_buf.ptr;
         out_len.* = 0;
         return .success;
     }
 
-    // Group consecutive cells with the same style into spans
-    var span_start: usize = 0;
-    var current_style = cellStyleInfo(pg, cells[0]);
+    // Build highlight index
+    var hl_idx: usize = 0;
+    const hl_count: usize = @as(usize, highlight_count);
 
-    var i: usize = 1;
-    while (i <= last_content) : (i += 1) {
-        const next_style = if (i < last_content) cellStyleInfo(pg, cells[i]) else CellStyle{};
-        const style_changed = i == last_content or !std.meta.eql(next_style, current_style);
+    // Render cells, splitting spans at style changes and highlight boundaries
+    var span_start: usize = col_start;
+    var current_style = cellStyleInfo(pg, cells[col_start]);
+    var in_mark = false;
 
-        if (style_changed) {
-            // Emit span for cells[span_start..i]
-            writeSpan(&buf, cells[span_start..i], current_style) catch return .out_of_memory;
-            span_start = i;
-            current_style = next_style;
+    // Check if we start inside a highlight
+    if (hl_count > 0 and highlight_buf != null) {
+        while (hl_idx < hl_count) {
+            const hl_end = @as(usize, highlight_buf.?[hl_idx * 2 + 1]);
+            if (hl_end <= col_start) {
+                hl_idx += 1;
+            } else break;
         }
+    }
+
+    var ci: usize = col_start + 1;
+    while (ci <= last_content) : (ci += 1) {
+        // Check for highlight boundary at ci
+        var hl_boundary = false;
+        if (hl_count > 0 and highlight_buf != null and hl_idx < hl_count) {
+            const hl_start = @as(usize, highlight_buf.?[hl_idx * 2]);
+            const hl_end = @as(usize, highlight_buf.?[hl_idx * 2 + 1]);
+            if (ci == hl_start or ci == hl_end) {
+                hl_boundary = true;
+            }
+        }
+
+        const next_style = if (ci < last_content) cellStyleInfo(pg, cells[ci]) else CellStyle{};
+        const style_changed = ci == last_content or !std.meta.eql(next_style, current_style);
+
+        if (style_changed or hl_boundary) {
+            // Emit accumulated span
+            writeSpan(&buf, cells[span_start..ci], current_style) catch return .out_of_memory;
+            span_start = ci;
+            if (ci < last_content) {
+                current_style = next_style;
+            }
+
+            // Handle highlight transitions
+            if (hl_count > 0 and highlight_buf != null and hl_idx < hl_count) {
+                const hl_start = @as(usize, highlight_buf.?[hl_idx * 2]);
+                const hl_end = @as(usize, highlight_buf.?[hl_idx * 2 + 1]);
+                if (ci == hl_start and !in_mark) {
+                    buf.appendSlice("<mark class=\"bg-yellow-400/50 outline-2 outline-yellow-400/50 rounded-[2px]\">") catch return .out_of_memory;
+                    in_mark = true;
+                }
+                if (ci == hl_end and in_mark) {
+                    buf.appendSlice("</mark>") catch return .out_of_memory;
+                    in_mark = false;
+                    hl_idx += 1;
+                }
+            }
+        }
+    }
+
+    if (in_mark) {
+        buf.appendSlice("</mark>") catch return .out_of_memory;
     }
 
     // Copy to a standalone allocation
