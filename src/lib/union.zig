@@ -74,10 +74,25 @@ pub fn TaggedUnion(
                     break :t Type;
                 };
 
+                // Check if the type is extern-compatible
+                const FinalType = final: {
+                    const info = @typeInfo(Type);
+                    switch (info) {
+                        .@"struct" => |s| {
+                            if (s.layout != .@"extern" and s.layout != .@"packed") {
+                                // Non-extern struct; replace with padding
+                                break :final [@sizeOf(Padding)]u8;
+                            }
+                        },
+                        else => {},
+                    }
+                    break :final Type;
+                };
+
                 union_fields[i] = .{
                     .name = field.name,
-                    .type = Type,
-                    .alignment = @alignOf(Type),
+                    .type = FinalType,
+                    .alignment = @alignOf(FinalType),
                 };
             }
 
