@@ -203,6 +203,18 @@ pub fn getRows(handle: TerminalHandle) callconv(.c) u16 {
     return wrapper.terminal.rows;
 }
 
+/// Get the cursor column (0-indexed).
+pub fn getCursorCol(handle: TerminalHandle) callconv(.c) u16 {
+    const wrapper = handle orelse return 0;
+    return wrapper.terminal.screens.active.cursor.x;
+}
+
+/// Get the cursor row (0-indexed).
+pub fn getCursorRow(handle: TerminalHandle) callconv(.c) u16 {
+    const wrapper = handle orelse return 0;
+    return wrapper.terminal.screens.active.cursor.y;
+}
+
 /// Resize the terminal.
 pub fn resize(
     handle: TerminalHandle,

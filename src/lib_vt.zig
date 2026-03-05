@@ -141,6 +141,8 @@ comptime {
         @export(&c.terminal_write, .{ .name = "ghostty_terminal_write" });
         @export(&c.terminal_get_cols, .{ .name = "ghostty_terminal_get_cols" });
         @export(&c.terminal_get_rows, .{ .name = "ghostty_terminal_get_rows" });
+        @export(&c.terminal_get_cursor_col, .{ .name = "ghostty_terminal_get_cursor_col" });
+        @export(&c.terminal_get_cursor_row, .{ .name = "ghostty_terminal_get_cursor_row" });
         @export(&c.terminal_resize, .{ .name = "ghostty_terminal_resize" });
         @export(&c.terminal_get_cell, .{ .name = "ghostty_terminal_get_cell" });
         @export(&c.terminal_get_cell_style, .{ .name = "ghostty_terminal_get_cell_style" });
