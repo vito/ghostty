@@ -134,6 +134,20 @@ comptime {
         @export(&c.osc_command_data, .{ .name = "ghostty_osc_command_data" });
         @export(&c.paste_is_safe, .{ .name = "ghostty_paste_is_safe" });
         @export(&c.color_rgb_get, .{ .name = "ghostty_color_rgb_get" });
+
+        // Terminal API
+        @export(&c.terminal_new, .{ .name = "ghostty_terminal_new" });
+        @export(&c.terminal_free, .{ .name = "ghostty_terminal_free" });
+        @export(&c.terminal_write, .{ .name = "ghostty_terminal_write" });
+        @export(&c.terminal_get_cols, .{ .name = "ghostty_terminal_get_cols" });
+        @export(&c.terminal_get_rows, .{ .name = "ghostty_terminal_get_rows" });
+        @export(&c.terminal_resize, .{ .name = "ghostty_terminal_resize" });
+        @export(&c.terminal_get_cell, .{ .name = "ghostty_terminal_get_cell" });
+        @export(&c.terminal_get_cell_style, .{ .name = "ghostty_terminal_get_cell_style" });
+        @export(&c.terminal_dump_screen, .{ .name = "ghostty_terminal_dump_screen" });
+        @export(&c.terminal_free_string, .{ .name = "ghostty_terminal_free_string" });
+        @export(&c.terminal_get_row_codepoints, .{ .name = "ghostty_terminal_get_row_codepoints" });
+        @export(&c.terminal_get_row_styles, .{ .name = "ghostty_terminal_get_row_styles" });
         @export(&c.sgr_new, .{ .name = "ghostty_sgr_new" });
         @export(&c.sgr_free, .{ .name = "ghostty_sgr_free" });
         @export(&c.sgr_reset, .{ .name = "ghostty_sgr_reset" });
